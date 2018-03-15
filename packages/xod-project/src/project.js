@@ -352,6 +352,99 @@ export const getPinsForNode = def(
 );
 
 /**
+ * Returns `Maybe Patch`, that is defined as a type of the Node.
+ * If specified Project contains specified Node it will return
+ * `Just Patch` guaranteed. Otherwise it could be `Nothing`.
+ */
+export const getPatchByNode = def(
+  'getPatchByNode :: Node -> Project -> Maybe Patch',
+  (node, project) =>
+    R.compose(getPatchByPath(R.__, project), Node.getNodeType)(node)
+);
+/**
+ * Returns Maybe list of Pins, computed from the Patch,
+ * that is defined as a type of the specified Node.
+ */
+export const getNodePins = def(
+  'getNodePins :: Node -> Project -> Maybe [Pin]',
+  (node, project) =>
+    R.compose(R.map(Patch.listPins), getPatchByNode(R.__, project))(node)
+);
+
+const getPinTypeByNodeIdAndPinKey = def(
+  'getPinTypeForLink :: NodeId -> PinKey -> Patch -> Project -> Either Error DataType',
+  (nodeId, pinKey, patch, project) => {
+    const patchPath = Patch.getPatchPath(patch);
+
+    return R.compose(
+      Tools.errOnNothing(
+        Utils.formatString(CONST.ERROR.PIN_NOT_FOUND, {
+          pinKey,
+          patchPath,
+        })
+      ),
+      R.map(Pin.getPinType),
+      R.chain(R.pipe(R.find(R.pipe(Pin.getPinKey, R.equals(pinKey))), Maybe)),
+      R.chain(getNodePins(R.__, project)),
+      Tools.errOnNothing(
+        Utils.formatString(CONST.ERROR.NODE_NOT_FOUND, {
+          nodeId,
+          patchPath,
+        })
+      ),
+      Patch.getNodeById
+    )(nodeId, patch);
+  }
+);
+
+/**
+ * Checks link for being between pins with compatible types
+ */
+const checkPinsCompability = def(
+  'checkPinsCompability :: Link -> Patch -> Project -> Either Error Link',
+  (link, patch, project) => {
+    const patchPath = Patch.getPatchPath(patch);
+    const inputNodeId = Link.getLinkInputNodeId(link);
+    const inputPinKey = Link.getLinkInputPinKey(link);
+    // :: Either Error PinType
+    const inputPinType = getPinTypeByNodeIdAndPinKey(
+      inputNodeId,
+      inputPinKey,
+      patch,
+      project
+    );
+
+    const outputNodeId = Link.getLinkOutputNodeId(link);
+    const outputPinKey = Link.getLinkOutputPinKey(link);
+    // :: Either Error PinType
+    const outputPinType = getPinTypeByNodeIdAndPinKey(
+      outputNodeId,
+      outputPinKey,
+      patch,
+      project
+    );
+
+    return R.compose(
+      R.map(R.always(link)),
+      R.chain(([outputType, inputType]) =>
+        Tools.errOnFalse(
+          {
+            title: CONST.ERROR_TITLES.BAD_LINKS,
+            message: Utils.formatString(CONST.ERROR.CANT_CAST_TYPES_DIRECTLY, {
+              fromType: outputType,
+              toType: inputType,
+              patchPath,
+            }),
+          },
+          R.apply(Utils.canCastTypes)
+        )([outputType, inputType])
+      ),
+      R.sequence(Either.of)
+    )([outputPinType, inputPinType]);
+  }
+);
+
+/**
  * Checks project for existence of patches and pins that used in link.
  *
  * @private
@@ -381,7 +474,10 @@ const checkPinKeys = def(
       // :: Maybe Patch -> Maybe Node -> Either Error Pin
       const checkPinExists = R.curry((maybePatch, maybeNode) =>
         R.compose(
-          Tools.errOnNothing(CONST.ERROR.PINS_NOT_FOUND),
+          Tools.errOnNothing({
+            title: CONST.ERROR_TITLES.DEAD_REFERENCE,
+            message: CONST.ERROR.PINS_NOT_FOUND,
+          }),
           R.chain(([justPatch, justNode]) =>
             R.ifElse(
               Patch.isVariadicPatch,
@@ -401,13 +497,24 @@ const checkPinKeys = def(
       // :: Maybe Patch -> Either Error Patch
       const checkNodePatchExists = maybePatch =>
         Tools.errOnNothing(
-          Utils.formatString(CONST.ERROR.TYPE_NOT_FOUND, { type: nodeType }),
+          {
+            title: CONST.ERROR_TITLES.DEAD_REFERENCE,
+            message: Utils.formatString(CONST.ERROR.TYPE_NOT_FOUND, {
+              type: nodeType,
+            }),
+          },
           maybePatch
         );
       // :: Maybe Node -> Either Error Node
       const checkNodeExists = maybeNode =>
         Tools.errOnNothing(
-          Utils.formatString(CONST.ERROR.NODE_NOT_FOUND, { nodeId, patchPath }),
+          {
+            title: CONST.ERROR_TITLES.DEAD_REFERENCE,
+            message: Utils.formatString(CONST.ERROR.NODE_NOT_FOUND, {
+              nodeId,
+              patchPath,
+            }),
+          },
           maybeNode
         );
 
@@ -420,6 +527,7 @@ const checkPinKeys = def(
 
     return check(Link.getLinkInputNodeId, Link.getLinkInputPinKey)
       .chain(() => check(Link.getLinkOutputNodeId, Link.getLinkOutputPinKey))
+      .chain(() => checkPinsCompability(link, patch, project))
       .map(R.always(patch));
   }
 );
@@ -446,9 +554,12 @@ export const validatePatchContents = def(
         R.compose(
           type =>
             R.compose(
-              Tools.errOnNothing(
-                Utils.formatString(CONST.ERROR.TYPE_NOT_FOUND, { type })
-              ),
+              Tools.errOnNothing({
+                title: CONST.ERROR_TITLES.DEAD_REFERENCE,
+                message: Utils.formatString(CONST.ERROR.TYPE_NOT_FOUND, {
+                  type,
+                }),
+              }),
               getPatchByPath(R.__, project)
             )(type),
           Node.getNodeType
@@ -704,25 +815,6 @@ export const updatePatch = def(
 // Getters with traversing through project
 //
 // =============================================================================
-/**
- * Returns `Maybe Patch`, that is defined as a type of the Node.
- * If specified Project contains specified Node it will return
- * `Just Patch` guaranteed. Otherwise it could be `Nothing`.
- */
-export const getPatchByNode = def(
-  'getPatchByNode :: Node -> Project -> Maybe Patch',
-  (node, project) =>
-    R.compose(getPatchByPath(R.__, project), Node.getNodeType)(node)
-);
-/**
- * Returns Maybe list of Pins, computed from the Patch,
- * that is defined as a type of the specified Node.
- */
-export const getNodePins = def(
-  'getNodePins :: Node -> Project -> Maybe [Pin]',
-  (node, project) =>
-    R.compose(R.map(Patch.listPins), getPatchByNode(R.__, project))(node)
-);
 /**
  * Returns Maybe Pin, extracted from the Patch,
  * that is defined as a type of the Node.
