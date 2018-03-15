@@ -464,14 +464,14 @@ export const validateLinkPins = def(
       const patchPath = Patch.getPatchPath(patch);
 
       // :: Maybe Node
-      const node = Patch.getNodeById(nodeId, patch);
+      const maybeNode = Patch.getNodeById(nodeId, patch);
       // :: Maybe NodeType
-      const nodeType = R.map(Node.getNodeType, node);
+      const maybeNodeType = R.map(Node.getNodeType, maybeNode);
       // :: Maybe Patch
-      const nodePatch = R.chain(getPatchByPath(R.__, project), nodeType);
+      const maybePatch = R.chain(getPatchByPath(R.__, project), maybeNodeType);
 
       // :: Maybe Patch -> Maybe Node -> Either Error Pin
-      const checkPinExists = R.curry((maybePatch, maybeNode) =>
+      const checkPinExists = R.curry((mPatch, mNode) =>
         R.compose(
           Tools.errOnNothing({
             title: CONST.ERROR_TITLES.DEAD_REFERENCE,
@@ -490,11 +490,11 @@ export const validateLinkPins = def(
             )(justPatch)
           ),
           R.unapply(R.sequence(Maybe.of))
-        )(maybePatch, maybeNode)
+        )(mPatch, mNode)
       );
 
-      // :: Maybe Patch -> Either Error Patch
-      const checkNodePatchExists = maybePatch =>
+      // :: Maybe Patch -> PatchPath -> Either Error Patch
+      const checkNodePatchExists = (mPatch, nodeType) =>
         Tools.errOnNothing(
           {
             title: CONST.ERROR_TITLES.DEAD_REFERENCE,
@@ -505,7 +505,7 @@ export const validateLinkPins = def(
           maybePatch
         );
       // :: Maybe Node -> Either Error Node
-      const checkNodeExists = maybeNode =>
+      const checkNodeExists = mNode =>
         Tools.errOnNothing(
           {
             title: CONST.ERROR_TITLES.DEAD_REFERENCE,
@@ -514,13 +514,18 @@ export const validateLinkPins = def(
               patchPath,
             }),
           },
-          maybeNode
+          mNode
         );
 
       return R.compose(
-        R.chain(() => checkPinExists(nodePatch, node)),
-        R.chain(() => checkNodePatchExists(nodePatch)),
-        () => checkNodeExists(node)
+        R.chain(() => checkPinExists(maybePatch, maybeNode)),
+        R.chain(
+          R.compose(
+            nodeType => checkNodePatchExists(maybePatch, nodeType),
+            Node.getNodeType
+          )
+        ),
+        () => checkNodeExists(maybeNode)
       )();
     };
 
