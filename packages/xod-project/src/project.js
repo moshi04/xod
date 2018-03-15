@@ -447,15 +447,14 @@ const checkPinsCompability = def(
 /**
  * Checks project for existence of patches and pins that used in link.
  *
- * @private
- * @function checkPinKeys
+ * @function validateLinkPins
  * @param {Link} link
  * @param {Patch} patch
  * @param {Project} project
  * @returns {Either<Error|Patch>}
  */
-const checkPinKeys = def(
-  'checkPinKeys :: Link -> Patch -> Project -> Either Error Patch',
+export const validateLinkPins = def(
+  'validateLinkPins :: Link -> Patch -> Project -> Either Error Patch',
   (link, patch, project) => {
     // TODO: Move check function and child functions on the top-level
     // :: (Link -> NodeId) -> (Link -> PinKey) -> Either Error Link
@@ -575,7 +574,7 @@ export const validatePatchContents = def(
         R.compose(
           R.map(R.always(patch)),
           R.sequence(Either.of),
-          R.map(checkPinKeys(R.__, patch, project))
+          R.map(validateLinkPins(R.__, patch, project))
         )
       ),
       Patch.listLinks
