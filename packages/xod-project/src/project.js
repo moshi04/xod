@@ -371,76 +371,104 @@ export const getNodePins = def(
     R.compose(R.map(Patch.listPins), getPatchByNode(R.__, project))(node)
 );
 
-const getPinTypeByNodeIdAndPinKey = def(
-  'getPinTypeForLink :: NodeId -> PinKey -> Patch -> Project -> Either Error DataType',
-  (nodeId, pinKey, patch, project) => {
+const checkPinsCompatibility = def(
+  'checkPinsCompatibility :: [Pin] -> Patch -> Either Error Patch',
+  ([inputPin, outputPin], patch) => {
     const patchPath = Patch.getPatchPath(patch);
+    const inputPinType = Pin.getPinType(inputPin);
+    const outputPinType = Pin.getPinType(outputPin);
 
     return R.compose(
-      Tools.errOnNothing(
-        Utils.formatString(CONST.ERROR.PIN_NOT_FOUND, {
-          pinKey,
-          patchPath,
-        })
-      ),
-      R.map(Pin.getPinType),
-      R.chain(R.pipe(R.find(R.pipe(Pin.getPinKey, R.equals(pinKey))), Maybe)),
-      R.chain(getNodePins(R.__, project)),
-      Tools.errOnNothing(
-        Utils.formatString(CONST.ERROR.NODE_NOT_FOUND, {
-          nodeId,
-          patchPath,
-        })
-      ),
-      Patch.getNodeById
-    )(nodeId, patch);
+      R.map(R.always(patch)),
+      Tools.errOnFalse(
+        {
+          title: CONST.ERROR_TITLES.BAD_LINKS,
+          message: Utils.formatString(CONST.ERROR.CANT_CAST_TYPES_DIRECTLY, {
+            fromType: outputPinType,
+            toType: inputPinType,
+            patchPath,
+          }),
+        },
+        Utils.canCastTypes
+      )
+    )(outputPinType, inputPinType);
   }
 );
 
 /**
- * Checks link for being between pins with compatible types
+ * Checks one of the link ends (defined by getters).
  */
-const checkPinsCompability = def(
-  'checkPinsCompability :: Link -> Patch -> Project -> Either Error Link',
-  (link, patch, project) => {
+const checkLinkPin = def(
+  'checkLinkPin :: (Link -> NodeId) -> (Link -> PinKey) -> Link -> Patch -> Project -> Either Error Pin',
+  (nodeIdGetter, pinKeyGetter, link, patch, project) => {
+    const nodeId = nodeIdGetter(link);
+    const pinKey = pinKeyGetter(link);
     const patchPath = Patch.getPatchPath(patch);
-    const inputNodeId = Link.getLinkInputNodeId(link);
-    const inputPinKey = Link.getLinkInputPinKey(link);
-    // :: Either Error PinType
-    const inputPinType = getPinTypeByNodeIdAndPinKey(
-      inputNodeId,
-      inputPinKey,
-      patch,
-      project
+
+    // :: Maybe Node
+    const maybeNode = Patch.getNodeById(nodeId, patch);
+    // :: Maybe NodeType
+    const maybeNodeType = R.map(Node.getNodeType, maybeNode);
+    // :: Maybe Patch
+    const maybePatch = R.chain(getPatchByPath(R.__, project), maybeNodeType);
+
+    // :: Maybe Patch -> Maybe Node -> Either Error (Map NodeId Pin)
+    const checkPinExists = R.curry((mPatch, mNode) =>
+      R.compose(
+        Tools.errOnNothing({
+          title: CONST.ERROR_TITLES.DEAD_REFERENCE,
+          message: CONST.ERROR.PINS_NOT_FOUND,
+        }),
+        R.chain(([justPatch, justNode]) =>
+          R.ifElse(
+            Patch.isVariadicPatch,
+            R.compose(
+              Maybe,
+              R.prop(pinKey),
+              R.reject(Pin.isDeadPin),
+              getPinsForNode(justNode, R.__, project)
+            ),
+            Patch.getPinByKey(pinKey)
+          )(justPatch)
+        ),
+        R.unapply(R.sequence(Maybe.of))
+      )(mPatch, mNode)
     );
 
-    const outputNodeId = Link.getLinkOutputNodeId(link);
-    const outputPinKey = Link.getLinkOutputPinKey(link);
-    // :: Either Error PinType
-    const outputPinType = getPinTypeByNodeIdAndPinKey(
-      outputNodeId,
-      outputPinKey,
-      patch,
-      project
-    );
+    // :: Maybe Patch -> PatchPath -> Either Error Patch
+    const checkNodePatchExists = (mPatch, nodeType) =>
+      Tools.errOnNothing(
+        {
+          title: CONST.ERROR_TITLES.DEAD_REFERENCE,
+          message: Utils.formatString(CONST.ERROR.TYPE_NOT_FOUND, {
+            type: nodeType,
+          }),
+        },
+        maybePatch
+      );
+    // :: Maybe Node -> Either Error Node
+    const checkNodeExists = mNode =>
+      Tools.errOnNothing(
+        {
+          title: CONST.ERROR_TITLES.DEAD_REFERENCE,
+          message: Utils.formatString(CONST.ERROR.NODE_NOT_FOUND, {
+            nodeId,
+            patchPath,
+          }),
+        },
+        mNode
+      );
 
     return R.compose(
-      R.map(R.always(link)),
-      R.chain(([outputType, inputType]) =>
-        Tools.errOnFalse(
-          {
-            title: CONST.ERROR_TITLES.BAD_LINKS,
-            message: Utils.formatString(CONST.ERROR.CANT_CAST_TYPES_DIRECTLY, {
-              fromType: outputType,
-              toType: inputType,
-              patchPath,
-            }),
-          },
-          R.apply(Utils.canCastTypes)
-        )([outputType, inputType])
+      R.chain(() => checkPinExists(maybePatch, maybeNode)),
+      R.chain(
+        R.compose(
+          nodeType => checkNodePatchExists(maybePatch, nodeType),
+          Node.getNodeType
+        )
       ),
-      R.sequence(Either.of)
-    )([outputPinType, inputPinType]);
+      () => checkNodeExists(maybeNode)
+    )();
   }
 );
 
@@ -456,83 +484,23 @@ const checkPinsCompability = def(
 export const validateLinkPins = def(
   'validateLinkPins :: Link -> Patch -> Project -> Either Error Patch',
   (link, patch, project) => {
-    // TODO: Move check function and child functions on the top-level
-    // :: (Link -> NodeId) -> (Link -> PinKey) -> Either Error Link
-    const check = (nodeIdGetter, pinKeyGetter) => {
-      const nodeId = nodeIdGetter(link);
-      const pinKey = pinKeyGetter(link);
-      const patchPath = Patch.getPatchPath(patch);
+    const checkInputPins = checkLinkPin(
+      Link.getLinkInputNodeId,
+      Link.getLinkInputPinKey
+    );
+    const checkOutputPins = checkLinkPin(
+      Link.getLinkOutputNodeId,
+      Link.getLinkOutputPinKey
+    );
 
-      // :: Maybe Node
-      const maybeNode = Patch.getNodeById(nodeId, patch);
-      // :: Maybe NodeType
-      const maybeNodeType = R.map(Node.getNodeType, maybeNode);
-      // :: Maybe Patch
-      const maybePatch = R.chain(getPatchByPath(R.__, project), maybeNodeType);
-
-      // :: Maybe Patch -> Maybe Node -> Either Error Pin
-      const checkPinExists = R.curry((mPatch, mNode) =>
-        R.compose(
-          Tools.errOnNothing({
-            title: CONST.ERROR_TITLES.DEAD_REFERENCE,
-            message: CONST.ERROR.PINS_NOT_FOUND,
-          }),
-          R.chain(([justPatch, justNode]) =>
-            R.ifElse(
-              Patch.isVariadicPatch,
-              R.compose(
-                Maybe,
-                R.prop(pinKey),
-                R.reject(Pin.isDeadPin),
-                getPinsForNode(justNode, R.__, project)
-              ),
-              Patch.getPinByKey(pinKey)
-            )(justPatch)
-          ),
-          R.unapply(R.sequence(Maybe.of))
-        )(mPatch, mNode)
-      );
-
-      // :: Maybe Patch -> PatchPath -> Either Error Patch
-      const checkNodePatchExists = (mPatch, nodeType) =>
-        Tools.errOnNothing(
-          {
-            title: CONST.ERROR_TITLES.DEAD_REFERENCE,
-            message: Utils.formatString(CONST.ERROR.TYPE_NOT_FOUND, {
-              type: nodeType,
-            }),
-          },
-          maybePatch
-        );
-      // :: Maybe Node -> Either Error Node
-      const checkNodeExists = mNode =>
-        Tools.errOnNothing(
-          {
-            title: CONST.ERROR_TITLES.DEAD_REFERENCE,
-            message: Utils.formatString(CONST.ERROR.NODE_NOT_FOUND, {
-              nodeId,
-              patchPath,
-            }),
-          },
-          mNode
-        );
-
-      return R.compose(
-        R.chain(() => checkPinExists(maybePatch, maybeNode)),
-        R.chain(
-          R.compose(
-            nodeType => checkNodePatchExists(maybePatch, nodeType),
-            Node.getNodeType
-          )
-        ),
-        () => checkNodeExists(maybeNode)
-      )();
-    };
-
-    return check(Link.getLinkInputNodeId, Link.getLinkInputPinKey)
-      .chain(() => check(Link.getLinkOutputNodeId, Link.getLinkOutputPinKey))
-      .chain(() => checkPinsCompability(link, patch, project))
-      .map(R.always(patch));
+    return R.compose(
+      R.map(R.always(patch)),
+      R.chain(checkPinsCompatibility(R.__, patch)),
+      R.sequence(Either.of)
+    )([
+      checkInputPins(link, patch, project),
+      checkOutputPins(link, patch, project),
+    ]);
   }
 );
 
